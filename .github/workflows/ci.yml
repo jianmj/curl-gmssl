@@ -1,65 +1,63 @@
-name: CI
+name: Build and Push Docker Image to GHCR
 
 on:
   push:
-    branches: [main, master]
+    branches: [ "main", "master" ]
   pull_request:
-    branches: [main, master]
+    branches: [ "main", "master" ]
+  # 允许在 Actions 页面手动触发
   workflow_dispatch:
 
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}/curl-gmssl
+
 jobs:
-  build:
-    name: Build curl-gmssl
-    runs-on: ubuntu-22.04
+  build-and-push:
+    runs-on: ubuntu-latest
+    
+    # ⚠️ 关键：必须赋予写入 Packages 的权限
+    permissions:
+      contents: read
+      packages: write
 
     steps:
-      - name: Checkout
+      # 1. 拉取代码
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential cmake
+      # 2. 设置 Docker Buildx（支持高级构建特性和缓存）
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-      - name: Build GmSSL v3.2.0
-        run: |
-          git clone --depth 1 --branch v3.2.0 https://github.com/guanzhi/GmSSL.git "$RUNNER_TEMP/GmSSL"
-          cmake -S "$RUNNER_TEMP/GmSSL" -B "$RUNNER_TEMP/GmSSL/build" \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/gmssl-install" \
-            -DENABLE_TLS=ON \
-            -DENABLE_AES=ON \
-            -DENABLE_SHA2=ON \
-            -DENABLE_SHA1=ON \
-            -DENABLE_SECP256R1=ON
-          cmake --build "$RUNNER_TEMP/GmSSL/build" --parallel 4
-          cmake --install "$RUNNER_TEMP/GmSSL/build"
+      # 3. 登录 GitHub Container Registry (GHCR)
+      - name: Log in to the Container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Configure curl-gmssl
-        run: |
-          cmake -S . -B build-gmssl \
-            -DCURL_USE_GMSSL=ON \
-            -DCURL_USE_OPENSSL=OFF \
-            -DCURL_USE_MBEDTLS=OFF \
-            -DGMSSL_LIBRARY="$RUNNER_TEMP/gmssl-install/lib/libgmssl.so" \
-            -DGMSSL_INCLUDE_DIR="$RUNNER_TEMP/gmssl-install/include" \
-            -DCURL_USE_LIBPSL=OFF \
-            -DCURL_ZSTD=OFF \
-            -DCURL_USE_LIBSSH2=OFF \
-            -DCURL_DISABLE_LDAP=ON \
-            -DBUILD_SHARED_LIBS=OFF \
-            -DBUILD_CURL_EXE=ON \
-            -DBUILD_EXAMPLES=OFF \
-            -DBUILD_TESTING=OFF \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_BUILD_RPATH="$RUNNER_TEMP/gmssl-install/lib"
+      # 4. 自动提取镜像元数据（生成规范的 Tags 和 Labels）
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha
+            type=ref,event=branch
+            type=semver,pattern={{version}}
 
-      - name: Build curl-gmssl
-        run: cmake --build build-gmssl --parallel 4
-
-      - name: Verify GmSSL backend
-        env:
-          LD_LIBRARY_PATH: ${{ runner.temp }}/gmssl-install/lib
-        run: |
-          ./build-gmssl/src/curl -V
-          ./build-gmssl/src/curl -V | grep "GmSSL/GmSSL 3.2.0"
+      # 5. 构建并推送 Docker 镜像
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # 使用 GitHub Actions 缓存，大幅加速后续构建
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
